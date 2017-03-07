@@ -612,21 +612,22 @@ class WithMavenStepExecution extends StepExecution {
                 // Global settings file residing on the agent
                 console.format("[withMaven] use Maven global settings provided on the build agent '%s' %n", settingsPath);
                 LOGGER.log(Level.FINE, "Copying maven global settings file from build agent {0} to {1}", new Object[]{settings, settingsDest});
-                settings.copyTo(settingsDest);
             } else if ((settings = new FilePath(new File(settingsPath))).exists()) { // File from the master
                 // Global settings file residing on the master
-                try {
-                    XmlUtils.checkFileIsaMavenSettingsFile(new File(settingsPath));
-                } catch (AbortException e) {
-                    LOGGER.log(Level.WARNING,"Invalid Maven Global Setting File executing " + this.build.getFullDisplayName(), e);
-                    throw e;
-                }
                 console.format("[withMaven] use Maven global settings provided on the master '%s' %n", settingsPath);
                 LOGGER.log(Level.FINE, "Copying maven global settings file from master to build agent {0} to {1}", new Object[]{settings, settingsDest});
-                settings.copyTo(settingsDest);
             } else {
                 throw new AbortException("Could not find file '" + settingsPath + "' on the build agent nor the master");
             }
+
+            try {
+                XmlUtils.checkFileIsaMavenSettingsFile(new File(settingsPath));
+            } catch (AbortException e) {
+                LOGGER.log(Level.WARNING, "Invalid Maven Global Setting File executing " + this.build.getFullDisplayName(), e);
+                throw e;
+            }
+            settings.copyTo(settingsDest);
+
             envOverride.put("GLOBAL_MVN_SETTINGS", settingsDest.getRemote());
             return settingsDest.getRemote();
         }
