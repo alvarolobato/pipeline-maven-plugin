@@ -36,7 +36,7 @@
   <groupId>org.jenkins-ci.plugins</groupId>
   <artifactId>pipeline-maven</artifactId>
   <packaging>hpi</packaging>
-  <version>3.0.1-SNAPSHOT</version>
+  <version>3.1.1-SNAPSHOT</version>
 
   <name>Pipeline Maven Integration Plugin</name>
   <description>
@@ -165,6 +165,13 @@
       <groupId>org.jenkins-ci.plugins</groupId>
       <artifactId>htmlpublisher</artifactId>
       <version>1.14</version>
+      <scope>compile</scope>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.jenkins-ci.plugins</groupId>
+      <artifactId>jgiven</artifactId>
+      <version>0.15.1</version>
       <scope>compile</scope>
       <optional>true</optional>
     </dependency>
@@ -317,40 +324,30 @@
   </dependencyManagement>
   <build>
     <plugins>
-        <plugin>
-          <groupId>org.apache.maven.plugins</groupId>
-          <artifactId>maven-dependency-plugin</artifactId>
-          <version>3.0.0</version>
-          <executions>
-            <execution>
-              <id>copy-maven-spy-jar</id>
-              <phase>process-resources</phase>
-              <goals>
-                <goal>copy</goal>
-              </goals>
-              <configuration>
-                <artifactItems>
-                  <artifactItem>
-                    <groupId>${project.groupId} </groupId>
-                    <artifactId>pipeline-maven-spy</artifactId>
-                    <version>${project.version}</version>
-                    <type>jar</type>
-                    <outputDirectory>${project.build.outputDirectory}/META-INF/lib/</outputDirectory>
-                  </artifactItem>
-                </artifactItems>
-                <stripVersion>true</stripVersion>
-              </configuration>
-            </execution>
-          </executions>
-        </plugin>
       <plugin>
-        <!--
-        TODO remove once https://github.com/jenkinsci/jenkins-test-harness-tools/pull/5 is merged
-        -->
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-dependency-plugin</artifactId>
         <version>3.0.0</version>
         <executions>
+          <execution>
+            <id>copy-maven-spy-jar</id>
+            <phase>process-resources</phase>
+            <goals>
+              <goal>copy</goal>
+            </goals>
+            <configuration>
+              <artifactItems>
+                <artifactItem>
+                  <groupId>${project.groupId}</groupId>
+                  <artifactId>pipeline-maven-spy</artifactId>
+                  <version>${project.version}</version>
+                  <type>jar</type>
+                  <outputDirectory>${project.build.outputDirectory}/META-INF/lib/</outputDirectory>
+                </artifactItem>
+              </artifactItems>
+              <stripVersion>true</stripVersion>
+            </configuration>
+          </execution>
           <execution>
             <id>copy-binary-files</id>
             <phase>process-test-resources</phase>

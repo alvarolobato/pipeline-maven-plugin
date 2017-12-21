@@ -54,6 +54,19 @@ public interface PipelineMavenPluginDao {
                           boolean ignoreUpstreamTriggers);
 
     /**
+     * Record a Maven parent project of a pom processed by this build of a build.
+     *
+     * @param jobFullName            see {@link Item#getFullName()}
+     * @param buildNumber            see {@link Run#getNumber()}
+     * @param parentGroupId                Maven dependency groupId
+     * @param parentArtifactId             Maven dependency artifactId
+     * @param parentVersion                Maven dependency version
+     * @param ignoreUpstreamTriggers see {@link PipelineGraphPublisher#isIgnoreUpstreamTriggers()} ()}
+     */
+    void recordParentProject(@Nonnull String jobFullName, int buildNumber,
+                             @Nonnull String parentGroupId, @Nonnull String parentArtifactId, @Nonnull String parentVersion,
+                             boolean ignoreUpstreamTriggers);
+    /**
      * Record a Maven artifact generated in a build.
      *
      * @param jobFullName            see {@link Item#getFullName()}
@@ -113,4 +126,9 @@ public interface PipelineMavenPluginDao {
      * Routine task to cleanup the database and reclaim disk space (if possible in the underlying database).
      */
     void cleanup();
+
+    /**
+     * Human readable toString
+     */
+    String toPrettyString();
 }

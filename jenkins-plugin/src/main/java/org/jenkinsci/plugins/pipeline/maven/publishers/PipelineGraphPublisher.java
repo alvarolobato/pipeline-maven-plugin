@@ -3,6 +3,7 @@ package org.jenkinsci.plugins.pipeline.maven.publishers;
 import hudson.Extension;
 import hudson.model.Run;
 import hudson.model.TaskListener;
+import hudson.util.ListBoxModel;
 import org.apache.commons.lang.StringUtils;
 import org.jenkinsci.Symbol;
 import org.jenkinsci.plugins.pipeline.maven.GlobalPipelineMavenConfig;
@@ -24,6 +25,8 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 import javax.annotation.Nonnull;
+
+import static org.jenkinsci.plugins.pipeline.maven.publishers.DependenciesLister.*;
 
 /**
  * Fingerprint the dependencies of the maven project.
@@ -48,6 +51,12 @@ public class PipelineGraphPublisher extends MavenPublisher {
     private boolean includeScopeProvided = true;
 
     private boolean skipDownstreamTriggers;
+
+    /**
+     * Lifecycle phase threshold to trigger downstream pipelines, "deploy" or "install" or "package" or ...
+     * If this phase has not been successfully reached during the build, then we don't trigger downstream pipelines
+     */
+    private String lifecycleThreshold = "deploy";
 
     private boolean ignoreUpstreamTriggers;
 
@@ -76,13 +85,63 @@ public class PipelineGraphPublisher extends MavenPublisher {
 
         PipelineMavenPluginDao dao = GlobalPipelineMavenConfig.get().getDao();
 
+        recordParentProject(mavenSpyLogsElt, run,listener, dao);
         recordDependencies(mavenSpyLogsElt, run, listener, dao);
-        recordGeneratedArtifacts(mavenSpyLogsElt,run,listener, dao);
+        recordGeneratedArtifacts(mavenSpyLogsElt, run, listener, dao);
+    }
+
+    protected void recordParentProject(@Nonnull Element mavenSpyLogsElt, @Nonnull Run run, @Nonnull TaskListener listener, @Nonnull PipelineMavenPluginDao dao) {
+        List<MavenSpyLogProcessor.MavenArtifact> parentProjects = listParentProjects(mavenSpyLogsElt, LOGGER);
+        recordParentProject(parentProjects, run, listener, dao);
+    }
+
+    protected void recordParentProject(List<MavenSpyLogProcessor.MavenArtifact> parentProjects, @Nonnull Run run, @Nonnull TaskListener listener, @Nonnull PipelineMavenPluginDao dao) {
+        if (LOGGER.isLoggable(Level.FINE)) {
+            listener.getLogger().println("[withMaven] pipelineGraphPublisher - recordParentProject - filter: " +
+                    "versions[snapshot: " + isIncludeSnapshotVersions() + ", release: " + isIncludeReleaseVersions() + "]");
+        }
+
+        for (MavenSpyLogProcessor.MavenArtifact parentProject : parentProjects) {
+            if (parentProject.snapshot) {
+                if (!includeSnapshotVersions) {
+                    if (LOGGER.isLoggable(Level.FINER)) {
+                        listener.getLogger().println("[withMaven] pipelineGraphPublisher - Skip recording snapshot parent project: " + parentProject.getId());
+                    }
+                    continue;
+                }
+            } else {
+                if (!includeReleaseVersions) {
+                    if (LOGGER.isLoggable(Level.FINER)) {
+                        listener.getLogger().println("[withMaven] pipelineGraphPublisher - Skip recording release parent project: " + parentProject.getId());
+                    }
+                    continue;
+                }
+            }
+
+            try {
+                if (LOGGER.isLoggable(Level.FINE)) {
+                    listener.getLogger().println("[withMaven] pipelineGraphPublisher - Record parent project: " + parentProject.getId() + ", ignoreUpstreamTriggers: " + ignoreUpstreamTriggers);
+                }
+
+                dao.recordParentProject(run.getParent().getFullName(), run.getNumber(),
+                        parentProject.groupId, parentProject.artifactId, parentProject.version,
+                        this.ignoreUpstreamTriggers);
+
+            } catch (RuntimeException e) {
+                listener.error("[withMaven] pipelineGraphPublisher - WARNING: Exception recording parent project " + parentProject.getId() + " on build, skip");
+                e.printStackTrace(listener.getLogger());
+                listener.getLogger().flush();
+            }
+        }
+
     }
 
     protected void recordDependencies(@Nonnull Element mavenSpyLogsElt, @Nonnull Run run, @Nonnull TaskListener listener, @Nonnull PipelineMavenPluginDao dao) {
-        List<MavenSpyLogProcessor.MavenDependency> dependencies = listDependencies(mavenSpyLogsElt);
+        List<MavenSpyLogProcessor.MavenDependency> dependencies = listDependencies(mavenSpyLogsElt, LOGGER);
+        recordDependencies(dependencies, run, listener, dao);
+    }
 
+    protected void recordDependencies(List<MavenSpyLogProcessor.MavenDependency> dependencies, @Nonnull Run run, @Nonnull TaskListener listener, @Nonnull PipelineMavenPluginDao dao) {
         if (LOGGER.isLoggable(Level.FINE)) {
             listener.getLogger().println("[withMaven] pipelineGraphPublisher - recordDependencies - filter: " +
                     "versions[snapshot: " + isIncludeSnapshotVersions() + ", release: " + isIncludeReleaseVersions() + "], " +
@@ -130,21 +189,50 @@ public class PipelineGraphPublisher extends MavenPublisher {
     }
 
     protected void recordGeneratedArtifacts(@Nonnull Element mavenSpyLogsElt, @Nonnull Run run, @Nonnull TaskListener listener, @Nonnull PipelineMavenPluginDao dao) {
+        List<MavenSpyLogProcessor.MavenArtifact> generatedArtifacts = listArtifacts(mavenSpyLogsElt);
+
+        List<String> executedLifecyclePhases = XmlUtils.getExecutedLifecyclePhases(mavenSpyLogsElt);
+        recordGeneratedArtifacts(generatedArtifacts, executedLifecyclePhases, run, listener, dao);
+    }
+
+    /**
+     * @param generatedArtifacts           deployed artifacts
+     * @param executedLifecyclePhases Maven lifecycle phases that have been gone through during the Maven execution (e.g. "..., compile, test, package..." )
+     * @param run
+     * @param listener
+     * @param dao
+     */
+    protected void recordGeneratedArtifacts(List<MavenSpyLogProcessor.MavenArtifact> generatedArtifacts, List<String> executedLifecyclePhases, @Nonnull Run run, @Nonnull TaskListener listener, @Nonnull PipelineMavenPluginDao dao) {
         if (LOGGER.isLoggable(Level.FINE)) {
             listener.getLogger().println("[withMaven] pipelineGraphPublisher - recordGeneratedArtifacts...");
         }
-        List<MavenSpyLogProcessor.MavenArtifact> generatedArtifacts = listArtifacts(mavenSpyLogsElt);
-        for(MavenSpyLogProcessor.MavenArtifact artifact: generatedArtifacts) {
+        for (MavenSpyLogProcessor.MavenArtifact artifact : generatedArtifacts) {
+            boolean skipDownstreamPipelines = this.skipDownstreamTriggers ||
+                    (!executedLifecyclePhases.contains(this.lifecycleThreshold));
 
             if (LOGGER.isLoggable(Level.FINE)) {
-                LOGGER.log(Level.FINE, "Build {0}#{1} - record generated {2}:{3}, version:{4}, skipDownstreamTriggers:{5}",
-                        new Object[]{run.getParent().getFullName(), run.getNumber(), artifact.getId(), artifact.type, artifact.version, skipDownstreamTriggers});
-                listener.getLogger().println("[withMaven] pipelineGraphPublisher - Record generated artifact: " + artifact.getId() + ", version: " + artifact.version + ", skipDownstreamTriggers: " + skipDownstreamTriggers +
+                LOGGER.log(Level.FINE, "Build {0}#{1} - record generated {2}:{3}, version:{4}, " +
+                                "executedLifecyclePhases: {5}, " +
+                                "skipDownstreamTriggers:{6}, lifecycleThreshold: {7}",
+                        new Object[]{run.getParent().getFullName(), run.getNumber(),
+                                artifact.getId(), artifact.type, artifact.version,
+                                executedLifecyclePhases,
+                                skipDownstreamTriggers, lifecycleThreshold});
+                listener.getLogger().println("[withMaven] pipelineGraphPublisher - Record generated artifact: " + artifact.getId() + ", version: " + artifact.version +
+                        ", executedLifecyclePhases: " + executedLifecyclePhases +
+                        ", skipDownstreamTriggers: " + skipDownstreamTriggers + ", lifecycleThreshold:" + lifecycleThreshold +
                         ", file: " + artifact.file);
             }
             dao.recordGeneratedArtifact(run.getParent().getFullName(), run.getNumber(),
                     artifact.groupId, artifact.artifactId, artifact.version, artifact.type, artifact.baseVersion,
-                    this.skipDownstreamTriggers);
+                    skipDownstreamPipelines);
+            if ("bundle".equals(artifact.type) && "jar".equals(artifact.extension)) {
+                // JENKINS-47069 org.apache.felix:maven-bundle-plugin:bundle uses the type "bundle" for "jar" files
+                // record artifact as both "bundle" and "jar"
+                dao.recordGeneratedArtifact(run.getParent().getFullName(), run.getNumber(),
+                        artifact.groupId, artifact.artifactId, artifact.version, "jar", artifact.baseVersion,
+                        skipDownstreamPipelines);
+            }
         }
     }
 
@@ -207,40 +295,11 @@ public class PipelineGraphPublisher extends MavenPublisher {
         return getClass().getName() + "[" +
                 "disabled=" + isDisabled() + ", " +
                 "scopes=" + getIncludedScopes() + ", " +
-                "versions={snapshot:" + isIncludeSnapshotVersions() + ", release:" + isIncludeReleaseVersions() + "}" +
+                "versions={snapshot:" + isIncludeSnapshotVersions() + ", release:" + isIncludeReleaseVersions() + "}, " +
+                "skipDownstreamTriggers=" + isSkipDownstreamTriggers() + ", " +
+                "lifecycleThreshold=" + getLifecycleThreshold() + ", " +
+                "ignoreUpstreamTriggers=" + isIgnoreUpstreamTriggers() +
                 ']';
-    }
-    /**
-     * @param mavenSpyLogs Root XML element
-     * @return list of {@link MavenSpyLogProcessor.MavenArtifact}
-     */
-    @Nonnull
-    public List<MavenSpyLogProcessor.MavenDependency> listDependencies(Element mavenSpyLogs) {
-
-        List<MavenSpyLogProcessor.MavenDependency> result = new ArrayList<>();
-
-        for (Element dependencyResolutionResult : XmlUtils.getChildrenElements(mavenSpyLogs, "DependencyResolutionResult")) {
-            Element resolvedDependenciesElt = XmlUtils.getUniqueChildElementOrNull(dependencyResolutionResult, "resolvedDependencies");
-
-            if (resolvedDependenciesElt == null) {
-                continue;
-            }
-
-            for (Element dependencyElt : XmlUtils.getChildrenElements(resolvedDependenciesElt, "dependency")) {
-                MavenSpyLogProcessor.MavenDependency dependencyArtifact = XmlUtils.newMavenDependency(dependencyElt);
-
-                Element fileElt = XmlUtils.getUniqueChildElementOrNull(dependencyElt, "file");
-                if (fileElt == null || fileElt.getTextContent() == null || fileElt.getTextContent().isEmpty()) {
-                    LOGGER.log(Level.WARNING, "listDependencies: no associated file found for " + dependencyArtifact + " in " + XmlUtils.toString(dependencyElt));
-                } else {
-                    dependencyArtifact.file = StringUtils.trim(fileElt.getTextContent());
-                }
-
-                result.add(dependencyArtifact);
-            }
-        }
-
-        return result;
     }
 
     public boolean isIncludeSnapshotVersions() {
@@ -315,6 +374,15 @@ public class PipelineGraphPublisher extends MavenPublisher {
         this.ignoreUpstreamTriggers = ignoreUpstreamTriggers;
     }
 
+    public String getLifecycleThreshold() {
+        return lifecycleThreshold;
+    }
+
+    @DataBoundSetter
+    public void setLifecycleThreshold(String lifecycleThreshold) {
+        this.lifecycleThreshold = lifecycleThreshold;
+    }
+
     @Symbol("pipelineGraphPublisher")
     @Extension
     public static class DescriptorImpl extends MavenPublisher.DescriptorImpl {
@@ -333,6 +401,20 @@ public class PipelineGraphPublisher extends MavenPublisher {
         @Override
         public String getSkipFileName() {
             return ".skip-pipeline-graph";
+        }
+
+        /**
+         * Only propose "package", "install" and "deploy" because the other lifecycle phases are unlikely to be useful
+         * @return
+         */
+        public ListBoxModel doFillLifecycleThresholdItems() {
+            ListBoxModel options = new ListBoxModel();
+
+            options.add("package");
+            options.add("install");
+            options.add("deploy");
+
+            return options;
         }
     }
 }

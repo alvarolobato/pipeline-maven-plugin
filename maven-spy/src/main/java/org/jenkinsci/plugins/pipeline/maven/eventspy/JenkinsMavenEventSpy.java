@@ -31,6 +31,7 @@ import org.jenkinsci.plugins.pipeline.maven.eventspy.handler.CatchAllExecutionHa
 import org.jenkinsci.plugins.pipeline.maven.eventspy.handler.DefaultSettingsBuildingRequestHandler;
 import org.jenkinsci.plugins.pipeline.maven.eventspy.handler.DependencyResolutionRequestHandler;
 import org.jenkinsci.plugins.pipeline.maven.eventspy.handler.DependencyResolutionResultHandler;
+import org.jenkinsci.plugins.pipeline.maven.eventspy.handler.DeployDeployExecutionHandler;
 import org.jenkinsci.plugins.pipeline.maven.eventspy.handler.FailsafeTestExecutionHandler;
 import org.jenkinsci.plugins.pipeline.maven.eventspy.handler.InvokerRunExecutionHandler;
 import org.jenkinsci.plugins.pipeline.maven.eventspy.handler.InvokerStartExecutionHandler;
@@ -46,6 +47,8 @@ import org.jenkinsci.plugins.pipeline.maven.eventspy.handler.SurefireTestExecuti
 import org.jenkinsci.plugins.pipeline.maven.eventspy.reporter.DevNullMavenEventReporter;
 import org.jenkinsci.plugins.pipeline.maven.eventspy.reporter.FileMavenEventReporter;
 import org.jenkinsci.plugins.pipeline.maven.eventspy.reporter.MavenEventReporter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.File;
 import java.io.IOException;
@@ -74,6 +77,8 @@ public class JenkinsMavenEventSpy extends AbstractEventSpy {
 
     public final static String DISABLE_MAVEN_EVENT_SPY_ENVIRONMENT_VARIABLE_NAME =  "JENKINS_MAVEN_AGENT_DISABLED";
 
+    private final Logger logger = LoggerFactory.getLogger(getClass());
+
     private MavenEventReporter reporter;
 
     /*
@@ -92,7 +97,7 @@ public class JenkinsMavenEventSpy extends AbstractEventSpy {
     public JenkinsMavenEventSpy() throws IOException {
         this.disabled = isEventSpyDisabled();
         if (disabled) {
-            System.out.println("[jenkins-maven-event-spy] INFO Jenkins Maven Event Spy is disabled");
+            logger.info("[jenkins-event-spy] Jenkins Maven Event Spy is disabled");
         }
     }
 
@@ -126,6 +131,7 @@ public class JenkinsMavenEventSpy extends AbstractEventSpy {
         handlers.add(new DependencyResolutionResultHandler(reporter));
         handlers.add(new MavenExecutionResultHandler(reporter));
         handlers.add(new SessionEndedHandler(reporter));
+        handlers.add(new DeployDeployExecutionHandler(reporter));
 
         handlers.add(new CatchAllExecutionHandler(reporter));
 
@@ -138,7 +144,6 @@ public class JenkinsMavenEventSpy extends AbstractEventSpy {
         }
 
         reporter.print(element);
-        reporter.print("new File(.): " + new File(".").getCanonicalPath());
     }
 
     @Override
@@ -162,9 +167,8 @@ public class JenkinsMavenEventSpy extends AbstractEventSpy {
 
         } catch (Throwable t) {
             blackList.add(event.getClass());
-            System.err.println("[jenkins-maven-event-spy] WARNING Exception processing " + event);
+            logger.warn("[jenkins-event-spy] Exception processing " + event, t);
             reporter.print(getClass().getName() + ": Exception processing " + event);
-            t.printStackTrace();
         }
     }
 

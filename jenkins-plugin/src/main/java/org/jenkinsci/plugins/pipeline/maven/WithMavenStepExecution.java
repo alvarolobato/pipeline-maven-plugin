@@ -75,7 +75,6 @@ import hudson.model.TaskListener;
 import hudson.slaves.WorkspaceList;
 import hudson.tasks.Maven;
 import hudson.tasks.Maven.MavenInstallation;
-import hudson.util.ArgumentListBuilder;
 import jenkins.model.Jenkins;
 import jenkins.mvn.DefaultGlobalSettingsProvider;
 import jenkins.mvn.DefaultSettingsProvider;
@@ -107,9 +106,17 @@ import org.springframework.util.ClassUtils;
 class WithMavenStepExecution extends StepExecution {
 
     private static final long serialVersionUID = 1L;
-    private static final String MAVEN_HOME = "MAVEN_HOME";
     private static final String M2_HOME = "M2_HOME";
+    private static final String MAVEN_HOME = "MAVEN_HOME";
     private static final String MAVEN_OPTS = "MAVEN_OPTS";
+    /**
+     * Environment variable of the path to the wrapped "mvn" command, you can just invoke "$MVN_CMD clean package"
+     */
+    private static final String MVN_CMD = "MVN_CMD";
+    /**
+     * Environment variable of the path to the parent folder of the wrapper of the "mvn" command, you can add it to the "PATH" with "export PATH=$MVN_CMD_DIR:$PATH"
+     */
+    private static final String MVN_CMD_DIR = "MVN_CMD_DIR";
 
     private static final Logger LOGGER = Logger.getLogger(WithMavenStepExecution.class.getName());
 
@@ -130,7 +137,7 @@ class WithMavenStepExecution extends StepExecution {
     private transient BodyExecution body;
 
     /**
-     * Inidicates if running on docker with <tt>docker.image()</tt>
+     * Indicates if running on docker with <tt>docker.image()</tt>
      */
     private boolean withContainer;
 
@@ -162,6 +169,7 @@ class WithMavenStepExecution extends StepExecution {
             LOGGER.log(Level.FINE, "Global settings FilePath: {0}", step.getGlobalMavenSettingsFilePath());
             LOGGER.log(Level.FINE, "Options: {0}", step.getOptions());
             LOGGER.log(Level.FINE, "env.PATH: {0}", env.get("PATH")); // JENKINS-40484
+            LOGGER.log(Level.FINE, "ws: {0}", ws.getRemote()); // JENKINS-47804
         }
 
         listener.getLogger().println("[withMaven] Options: " + step.getOptions());
@@ -172,6 +180,19 @@ class WithMavenStepExecution extends StepExecution {
 
         withContainer = detectWithContainer();
 
+        if (withContainer) {
+            listener.getLogger().println("[withMaven] WARNING: \"withMaven(){...}\" step running within \"docker.image('image').inside {...}\"." +
+                    " Since the Docker Pipeline Plugin version 1.14, you MUST:");
+            listener.getLogger().println("[withMaven] * Either prepend the 'MVN_CMD_DIR' environment variable" +
+                    " to the 'PATH' environment variable in every 'sh' step that invokes 'mvn' (e.g. \"sh \'export PATH=$MVN_CMD_DIR:$PATH && mvn clean deploy\' \"). ");
+            listener.getLogger().print("[withMaven] * Or use ");
+            listener.hyperlink("https://github.com/takari/maven-wrapper", "Takari's Maven Wrapper");
+            listener.getLogger().println(" (e.g. \"sh './mvnw clean deploy'\")");
+            listener.getLogger().print("[withMaven] See ");
+            listener.hyperlink("https://wiki.jenkins.io/display/JENKINS/Pipeline+Maven+Plugin#PipelineMavenPlugin-HowtousethePipelineMavenPluginwithDocker", "Pipeline Maven Plugin FAQ");
+            listener.getLogger().println(".");
+        }
+
         setupJDK();
 
         // list of credentials injected by withMaven. They will be tracked and masked in the logs
@@ -179,7 +200,7 @@ class WithMavenStepExecution extends StepExecution {
         setupMaven(credentials);
 
         if (LOGGER.isLoggable(Level.FINE)) {
-            LOGGER.log(Level.FINE, this.build +  " - Track usage and mask password of credentials " + Joiner.on(", ").join(Collections2.transform(credentials, new CredentialsToPrettyString())));
+            LOGGER.log(Level.FINE, this.build + " - Track usage and mask password of credentials " + Joiner.on(", ").join(Collections2.transform(credentials, new CredentialsToPrettyString())));
         }
         CredentialsProvider.trackAll(build, new ArrayList<>(credentials));
 
@@ -193,7 +214,7 @@ class WithMavenStepExecution extends StepExecution {
 
         EnvironmentExpander envEx = EnvironmentExpander.merge(getContext().get(EnvironmentExpander.class), new ExpanderImpl(envOverride));
 
-        LOGGER.log(Level.ALL, "envOverride: {0}", envOverride); // JENKINS-40484
+        LOGGER.log(Level.FINEST, "envOverride: {0}", envOverride); // JENKINS-40484
 
         body = getContext().newBodyInvoker().withContexts(envEx, newFilter).withCallback(new WorkspaceCleanupCallback(tempBinDir, step.getOptions())).start();
 
@@ -242,8 +263,8 @@ class WithMavenStepExecution extends StepExecution {
             // see #detectWithContainer()
             LOGGER.log(Level.FINE, "Ignoring JDK installation parameter: {0}", jdkInstallationName);
             console.println("WARNING: \"withMaven(){...}\" step running within \"docker.image().inside{...}\"," +
-                            " tool installations are not available see https://issues.jenkins-ci.org/browse/JENKINS-36159. " +
-                            "You have specified a JDK installation \"" + jdkInstallationName + "\", which will be ignored.");
+                    " tool installations are not available see https://issues.jenkins-ci.org/browse/JENKINS-36159. " +
+                    "You have specified a JDK installation \"" + jdkInstallationName + "\", which will be ignored.");
             return;
         }
 
@@ -263,31 +284,29 @@ class WithMavenStepExecution extends StepExecution {
     }
 
     /**
-     *
      * @param credentials list of credentials injected by withMaven. They will be tracked and masked in the logs.
-     * @throws AbortException
      * @throws IOException
      * @throws InterruptedException
      */
-    private void setupMaven(@Nonnull Collection<Credentials> credentials) throws AbortException, IOException, InterruptedException {
-        String mvnExecPath = obtainMavenExec();
-
-        // Temp dir with the wrapper that will be prepended to the path
+    private void setupMaven(@Nonnull Collection<Credentials> credentials) throws IOException, InterruptedException {
+        // Temp dir with the wrapper that will be prepended to the path and the temporary files used by withMaven (settings files...)
         tempBinDir = tempDir(ws).child("withMaven" + Util.getDigestOf(UUID.randomUUID().toString()).substring(0, 8));
         tempBinDir.mkdirs();
-        // set the path to our script
-        envOverride.put("PATH+MAVEN", tempBinDir.getRemote());
+        envOverride.put("MVN_CMD_DIR", tempBinDir.getRemote());
 
-        LOGGER.log(Level.FINE, "Using temp dir: {0}", tempBinDir.getRemote());
+        // SETTINGS FILES
+        String settingsFilePath = setupSettingFile(credentials);
+        String globalSettingsFilePath = setupGlobalSettingFile(credentials);
 
-        if (mvnExecPath == null) {
-            throw new AbortException("Couldn\u2019t find any maven executable");
-        }
+        // LOCAL REPOSITORY
+        String mavenLocalRepo = setupMavenLocalRepo();
 
-        FilePath mvnExec = new FilePath(ws.getChannel(), mvnExecPath);
+        // MAVEN EVENT SPY
         FilePath mavenSpyJarPath = setupMavenSpy();
 
-        // JAVA_TOOL_OPTIONS: https://docs.oracle.com/javase/8/docs/technotes/guides/troubleshoot/envvars002.html
+        //
+        // JAVA_TOOL_OPTIONS
+        // https://docs.oracle.com/javase/8/docs/technotes/guides/troubleshoot/envvars002.html
         String javaToolsOptions = env.get("JAVA_TOOL_OPTIONS", "");
         if (StringUtils.isNotEmpty(javaToolsOptions)) {
             javaToolsOptions += " ";
@@ -296,11 +315,25 @@ class WithMavenStepExecution extends StepExecution {
                 "-Dorg.jenkinsci.plugins.pipeline.maven.reportsFolder=\"" + this.tempBinDir.getRemote() + "\" ";
         envOverride.put("JAVA_TOOL_OPTIONS", javaToolsOptions);
 
-        String content = mavenWrapperContent(mvnExec, setupSettingFile(credentials), setupGlobalSettingFile(credentials), setupMavenLocalRepo());
+        //
+        // MAVEN_CONFIG
+        StringBuilder mavenConfig = new StringBuilder();
+        mavenConfig.append("--batch-mode ");
+        mavenConfig.append("--show-version ");
+        if (StringUtils.isNotEmpty(settingsFilePath)) {
+            mavenConfig.append("--settings \"" + settingsFilePath + "\" ");
+        }
+        if (StringUtils.isNotEmpty(globalSettingsFilePath)) {
+            mavenConfig.append("--global-settings \"" + globalSettingsFilePath + "\" ");
+        }
+        if (StringUtils.isNotEmpty(mavenLocalRepo)) {
+            mavenConfig.append("-Dmaven.repo.local=\"" + mavenLocalRepo + "\" ");
+        }
 
-        createWrapperScript(tempBinDir, mvnExec.getName(), content);
+        envOverride.put("MAVEN_CONFIG", mavenConfig.toString());
 
-        // Maven Ops
+        //
+        // MAVEN_OPTS
         if (StringUtils.isNotEmpty(step.getMavenOpts())) {
             String mavenOpts = envOverride.expand(env.expand(step.getMavenOpts()));
 
@@ -310,6 +343,25 @@ class WithMavenStepExecution extends StepExecution {
             }
             envOverride.put(MAVEN_OPTS, mavenOpts.replaceAll("[\t\r\n]+", " "));
         }
+
+        // MAVEN SCRIPT WRAPPER
+        String mvnExecPath = obtainMavenExec();
+
+        LOGGER.log(Level.FINE, "Using temp dir: {0}", tempBinDir.getRemote());
+
+        if (mvnExecPath == null) {
+            throw new AbortException("Couldn\u2019t find any maven executable");
+        }
+
+        FilePath mvnExec = new FilePath(ws.getChannel(), mvnExecPath);
+        String content = generateMavenWrapperScriptContent(mvnExec, mavenConfig.toString());
+
+        // ADD MAVEN WRAPPER SCRIPT PARENT DIRECTORY TO PATH
+        // WARNING MUST BE INVOKED AFTER obtainMavenExec(), THERE SEEM TO BE A BUG IN ENVIRONMENT VARIABLE HANDLING IN obtainMavenExec()
+        envOverride.put("PATH+MAVEN", tempBinDir.getRemote());
+
+        createWrapperScript(tempBinDir, mvnExec.getName(), content);
+
     }
 
     private FilePath setupMavenSpy() throws IOException, InterruptedException {
@@ -347,7 +399,7 @@ class WithMavenStepExecution extends StepExecution {
         return mavenSpyJarFilePath;
     }
 
-    private String obtainMavenExec() throws AbortException, IOException, InterruptedException {
+    private String obtainMavenExec() throws IOException, InterruptedException {
         String mavenInstallationName = step.getMaven();
         LOGGER.log(Level.FINE, "Setting up maven: {0}", mavenInstallationName);
 
@@ -370,7 +422,7 @@ class WithMavenStepExecution extends StepExecution {
                 if (mavenInstallationName.equals(i.getName())) {
                     mavenInstallation = i;
                     consoleMessage.append(" use Maven installation '" + mavenInstallation.getName() + "'");
-                    LOGGER.log(Level.FINE, "Found maven installation {0} with installation home {1}", new Object[]{mavenInstallation.getName(),  mavenInstallation.getHome()});
+                    LOGGER.log(Level.FINE, "Found maven installation {0} with installation home {1}", new Object[]{mavenInstallation.getName(), mavenInstallation.getHome()});
                     break;
                 }
             }
@@ -490,58 +542,40 @@ class WithMavenStepExecution extends StepExecution {
     }
 
     /**
-     * Generates the content of the maven wrapper script that works
+     * Generates the content of the maven wrapper script
      *
-     * @param mvnExec            maven executable location
-     * @param settingsFile       settings file
-     * @param globalSettingsFile global settings file
-     * @param mavenLocalRepo     maven local repo location
+     * @param mvnExec maven executable location
+     * @param mavenConfig config arguments added to the "mvn" command line
      * @return wrapper script content
      * @throws AbortException when problems creating content
      */
-    private String mavenWrapperContent(FilePath mvnExec, String settingsFile, String globalSettingsFile, String mavenLocalRepo) throws AbortException {
-
-        ArgumentListBuilder argList = new ArgumentListBuilder(mvnExec.getRemote());
+    private String generateMavenWrapperScriptContent(@Nonnull FilePath mvnExec, @Nonnull String mavenConfig) throws AbortException {
 
         boolean isUnix = Boolean.TRUE.equals(getComputer().isUnix());
 
-        String lineSep = isUnix ? "\n" : "\r\n";
+        StringBuilder script = new StringBuilder();
 
-        if (StringUtils.isNotEmpty(settingsFile)) {
-            argList.add("--settings", settingsFile);
-        }
+        if (isUnix) { // Linux, Unix, MacOSX
+            String lineSep = "\n";
+            script.append("#!/bin/sh -e").append(lineSep);
+            script.append("echo ----- withMaven Wrapper script -----").append(lineSep);
+            script.append("\"" + mvnExec.getRemote() + "\" " + mavenConfig + " \"$@\"").append(lineSep);
 
-        if (StringUtils.isNotEmpty(globalSettingsFile)) {
-            argList.add("--global-settings", globalSettingsFile);
-        }
-
-        if (StringUtils.isNotEmpty(mavenLocalRepo)) {
-            argList.addKeyValuePair(null, "maven.repo.local", mavenLocalRepo, false);
-        }
-
-        argList.add("--batch-mode");
-        argList.add("--show-version");
-
-        StringBuilder c = new StringBuilder();
-
-        if (isUnix) {
-            c.append("#!/bin/sh -e").append(lineSep);
         } else { // Windows
-            c.append("@echo off").append(lineSep);
+            String lineSep = "\r\n";
+            script.append("@echo off").append(lineSep);
+            script.append("echo ----- withMaven Wrapper script -----").append(lineSep);
+            script.append("\"" + mvnExec.getRemote() + "\" " + mavenConfig + " %*").append(lineSep);
         }
 
-        c.append("echo ----- withMaven Wrapper script -----").append(lineSep);
-        c.append(argList.toString()).append(isUnix ? " \"$@\"" : " %*").append(lineSep);
-
-        String content = c.toString();
-        LOGGER.log(Level.FINER, "Generated wrapper: {0}", content);
-        return content;
+        LOGGER.log(Level.FINER, "Generated Maven wrapper script: \n{0}", script);
+        return script.toString();
     }
 
     /**
      * Creates the actual wrapper script file and sets the permissions.
      *
-     * @param tempBinDir dir to create the script file on
+     * @param tempBinDir dir to create the script file
      * @param name       the script file name
      * @param content    contents of the file
      * @return
@@ -550,6 +584,7 @@ class WithMavenStepExecution extends StepExecution {
      */
     private FilePath createWrapperScript(FilePath tempBinDir, String name, String content) throws IOException, InterruptedException {
         FilePath scriptFile = tempBinDir.child(name);
+        envOverride.put(MVN_CMD, scriptFile.getRemote());
 
         scriptFile.write(content, getComputer().getDefaultCharset().name());
         scriptFile.chmod(0755);
@@ -566,15 +601,18 @@ class WithMavenStepExecution extends StepExecution {
      */
     @Nullable
     private String setupMavenLocalRepo() throws IOException, InterruptedException {
+        String expandedMavenLocalRepo;
         if (StringUtils.isEmpty(step.getMavenLocalRepo())) {
-            return null;
+            expandedMavenLocalRepo = null;
         } else {
             // resolve relative/absolute with workspace as base
             String expandedPath = envOverride.expand(env.expand(step.getMavenLocalRepo()));
             FilePath repoPath = new FilePath(ws, expandedPath);
             repoPath.mkdirs();
-            return repoPath.getRemote();
+            expandedMavenLocalRepo = repoPath.getRemote();
         }
+        LOGGER.log(Level.FINEST, "setupMavenLocalRepo({0}): {1}", new Object[]{step.getMavenLocalRepo(), expandedMavenLocalRepo});
+        return expandedMavenLocalRepo;
     }
 
     /**
@@ -725,7 +763,7 @@ class WithMavenStepExecution extends StepExecution {
      * folder to use it with the maven wrapper script
      *
      * @param mavenSettingsConfigId config file id from Config File Provider
-     * @param mavenSettingsFile path to write te content to
+     * @param mavenSettingsFile     path to write te content to
      * @param credentials
      * @return the {@link FilePath} to the settings file
      * @throws AbortException in case of error
@@ -780,7 +818,7 @@ class WithMavenStepExecution extends StepExecution {
      * folder to use it with the maven wrapper script
      *
      * @param mavenGlobalSettingsConfigId global config file id from Config File Provider
-     * @param mavenGlobalSettingsFile path to write te content to
+     * @param mavenGlobalSettingsFile     path to write te content to
      * @param credentials
      * @return the {@link FilePath} to the settings file
      * @throws AbortException in case of error
@@ -841,7 +879,7 @@ class WithMavenStepExecution extends StepExecution {
         private final Map<String, String> overrides;
 
         private ExpanderImpl(EnvVars overrides) {
-            LOGGER.log(Level.ALL, "ExpanderImpl(overrides: {0})", new Object[]{overrides});
+            LOGGER.log(Level.FINEST, "ExpanderImpl(overrides: {0})", new Object[]{overrides});
             this.overrides = new HashMap<>();
             for (Entry<String, String> entry : overrides.entrySet()) {
                 this.overrides.put(entry.getKey(), entry.getValue());
@@ -850,9 +888,9 @@ class WithMavenStepExecution extends StepExecution {
 
         @Override
         public void expand(EnvVars env) throws IOException, InterruptedException {
-            LOGGER.log(Level.ALL, "ExpanderImpl.expand - env before expand: {0}", new Object[]{env}); // JENKINS-40484
+            LOGGER.log(Level.FINEST, "ExpanderImpl.expand - env before expand: {0}", new Object[]{env}); // JENKINS-40484
             env.overrideAll(overrides);
-            LOGGER.log(Level.ALL, "ExpanderImpl.expand - env after expand: {0}", new Object[]{env}); // JENKINS-40484
+            LOGGER.log(Level.FINEST, "ExpanderImpl.expand - env after expand: {0}", new Object[]{env}); // JENKINS-40484
         }
     }
 
